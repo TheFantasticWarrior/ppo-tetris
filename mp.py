@@ -100,10 +100,10 @@ def _flatten_obs(obs):
     assert isinstance(obs, (list, tuple))
     assert len(obs) > 0
 
-    # (nenv,2,5,...)
-    return [np.stack([player[i] for env in obs for player in env])
-            if i != 4 else [player[i] for env in obs for player in env]
-            for i in range(5)]
+    # (nenv,2,5,...)->(5,2,nenv,...)
+    return [np.swapaxes(np.stack(
+        [[player[i] for player in env] for env in obs]), 0, 1)
+        for i in range(5)]
     if isinstance(obs[0], dict):
         keys = obs[0].keys()
         return {k: np.stack([o[k] for o in obs]) for k in keys}
