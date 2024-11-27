@@ -7,6 +7,7 @@ class Model(nn.Module):
     def __init__(self, ff_size=1024, d_model=512):
         super(Model, self).__init__()
         self.d_model = d_model
+        self.loc_embedding = nn.Linear(3, d_model)
         self.piece_embedding = nn.Embedding(8, d_model)
         self.rotation_embedding = nn.Linear(d_model, d_model*4)
 
@@ -29,9 +30,11 @@ class Model(nn.Module):
         self.value = nn.Linear(ff_size, 1)
 
     def forward(self, x):
-        queue, remains, board, garbage = x
+        xyrot, queue, remains, board, garbage = x
+        loc_processed = self.loc_embedding(xyrot)
+        queue[0] += loc_processed
         batch_size = queue.size(0)
-        remain_indices = torch.nonzero(remains)
+        remain_indices = torch.nonzero(remains).squeeze(-1)+1
         pieces = torch.cat((queue, remain_indices), 1)
         pieces_processed = self.piece_embedding(pieces)
         pieces_with_rotations = self.rotation_embedding(
