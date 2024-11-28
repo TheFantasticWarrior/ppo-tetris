@@ -37,20 +37,18 @@ class Model(nn.Module):
         xyrot, queue, remains, board, garbage = x
         loc_processed = self.loc_embedding(xyrot)
         batch_size = queue.size(0)
-        remain_indices = torch.nonzero(remains)+1
-        if torch.any(remain_indices):
-            pieces = torch.cat((queue, remain_indices), 1)
-        else:
-            pieces = queue
+
+        pieces = torch.cat((queue, remains), 1)
+
         pieces_processed = self.piece_embedding(pieces)
         pieces_processed[:, 0] += loc_processed
         pieces_with_rotations = self.rotation_embedding(
-            pieces_processed).reshape(batch_size, -1, 4, self.d_model)
+            pieces_processed).view(batch_size, -1, 4, self.d_model)
         pieces_visible = pieces_with_rotations[:, :7]
         pieces_not_visible = pieces_with_rotations[:, 7:]
 
         garbage_processed = self.garbage_embedding(
-            garbage.unsqueeze(-1).float())
+            garbage.unsqueeze(1).float())
         garbage_processed = self.garbage_embedding2(
             garbage_processed.amax(-1)
         )
@@ -113,11 +111,11 @@ class FinalModel(nn.Module):
     def forward(self, x, y):
         batch_size = x.size(0)
         ins = torch.cat((x, y), -1)
-        x = self.combine(ins).reshape(batch_size, 10, self.d_model)
+        x = self.combine(ins).view(batch_size, 10, self.d_model)
         x = self.t_encoder(x).view(batch_size, -1)
         x = self.linear(x)
         logits = self.policy(x)
-        value = self.value(x)
+        value = self.value(x).squeeze()
         return logits, value
 
 

@@ -10,13 +10,14 @@ class manager:
         cpus = mp.cpu_count()
         self.nenvs = nenvs-(nenvs % cpus) if nenvs > cpus else nenvs
         self.nremotes = min(cpus, self.nenvs)
-        self.seeds = np.arange(self.nenvs)
+        self.seeds = np.arange(self.nenvs)+seed
         # self.envs=[make_env(seed+i) for i in range(nenvs)]
         env_seeds = np.array_split(self.seeds, self.nremotes)
         self.remotes, self.work_remotes = zip(
             *[Pipe() for _ in range(self.nremotes)])
         self.ps = [Process(target=gather_data,
-                           args=(work_remote, remote, render, seed))
+                           args=(work_remote, remote,
+                                 render and (seeds[0] == seed), seeds))
                    for work_remote, remote, seeds in
                    zip(self.work_remotes, self.remotes, env_seeds)]
         for p in self.ps:
@@ -36,8 +37,7 @@ class manager:
         ob, rew, done, info = zip(* [remote.recv()
                                      for remote in self.remotes])
         obs = _flatten_obs(ob)
-        c = _flatten_list(rew)
-        c = np.stack(c)
+        c = np.stack(rew).T
         for i in info:
             if i is not None:
                 self.count += 2
@@ -52,7 +52,6 @@ class manager:
         for remote in self.remotes:
             remote.send(('reset', None))
         obs = [remote.recv() for remote in self.remotes]
-        obs = _flatten_list(obs)
         return _flatten_obs(obs)
 
     def close(self):
@@ -64,30 +63,33 @@ class manager:
 
 def gather_data(remote, parent_remote, render, seed):
     parent_remote.close()
-    env = tetris.Container()
-    env.seed_reset(seed)
+    game = tetris.Container()
+    game.seed_reset(seed[0])
     if render:
-        r = tetris.Renderer(1, 10, 30)
+        r = tetris.Renderer(1, 10)
     try:
         while True:
 
             cmd, action = remote.recv()
             if cmd == 'step':
-                env.step(*action)
-                x, done, rew = env.get_state()
-
+                game.step(*action)
+                try:
+                    x, done, rew = game.get_state()
+                except:
+                    print(game.get_state())
+                    raise
                 if render:
-                    r.render(env)
+                    r.render(game)
                 if done:
-                    x, info = env.reset()
+                    info = game.reset()
+                    x, done, rew = game.get_state()
                 else:
                     info = None
                 remote.send((x, rew, done, info))
             elif cmd == 'reset':
-                x, _, _ = env.get_state()
+                x, _, _ = game.get_state()
                 remote.send(x)
             elif cmd == 'close':
-                env.close()
                 remote.close()
                 if render:
                     r.close()
