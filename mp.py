@@ -45,10 +45,12 @@ class manager:
                 self.atk += i[1]+i[3]
         return obs, done, c
 
-    def reset(self):
+    def reset_data(self):
         self.count = 0
         self.lines = 0
         self.atk = 0
+
+    def reset(self):
         for remote in self.remotes:
             remote.send(('reset', None))
         obs = [remote.recv() for remote in self.remotes]
@@ -73,16 +75,14 @@ def gather_data(remote, parent_remote, render, seed):
             cmd, action = remote.recv()
             if cmd == 'step':
                 game.step(*action)
-                try:
-                    x, done, rew = game.get_state()
-                except:
-                    print(game.get_state())
-                    raise
+                x, done, rew = game.get_state()
                 if render:
                     r.render(game)
+                    # if rew[0]!=0:
+                    #     print(f"{rew[0]:.2f}")
                 if done:
                     info = game.reset()
-                    x, done, rew = game.get_state()
+                    x, _, _ = game.get_state()
                 else:
                     info = None
                 remote.send((x, rew, done, info))
