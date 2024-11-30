@@ -15,7 +15,7 @@ class Buffer:
                         torch.device("cuda"))
                     ]
         self.memory = torch.zeros(
-            (2, nsteps, nenvs, 8, args.d_model), dtype=torch.float32).to(torch.device("cuda"))
+            (2, nsteps, nenvs, 4, args.d_model), dtype=torch.float32).to(torch.device("cuda"))
         self.done = torch.zeros((nsteps, nenvs)).to(torch.device("cuda"))
         self.rews = torch.zeros((2, nsteps, nenvs)).to(torch.device("cuda"))
         self.actions = torch.zeros((2, nsteps, nenvs)).to(torch.device("cuda"))
@@ -49,7 +49,7 @@ def sample(logits):
 def calc_gae(buf, next_vals, last_done, gamma=0.9993, gae_lambda=0.95):
     advantages = torch.zeros_like(buf.rews).to(torch.device("cuda"))
     lastgaelam = 0
-    num_steps = advantages.size(0)
+    num_steps = advantages.size(1)
     for t in reversed(range(num_steps)):
         if t == num_steps - 1:
             nextnonterminal = ~last_done

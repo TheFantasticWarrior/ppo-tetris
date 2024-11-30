@@ -8,7 +8,7 @@ render = 1
 gpu = True  # not debug
 action_space = 10
 
-seed = 1
+seed = 100
 nenvs = 4 if debug else 16
 nsteps = 256
 nepoch = 4
@@ -17,6 +17,7 @@ nminibatch = 4
 samplesperbatch = nenvs*nsteps//nminibatch
 iterations = 5000
 
+lr = 2.5e-4
 cliprange = 0.1
 ent_coef = 0.01
 vf_coef = 0.5

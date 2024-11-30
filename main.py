@@ -12,15 +12,15 @@ def main():
 
     obs = env.reset()
     done = torch.zeros(args.nenvs, dtype=bool)
-    mem0 = torch.zeros((args.nenvs, 8, args.d_model),
+    mem0 = torch.zeros((args.nenvs, 4, args.d_model),
                        device=torch.device("cuda"))
-    mem1 = torch.zeros((args.nenvs, 8, args.d_model),
+    mem1 = torch.zeros((args.nenvs, 4, args.d_model),
                        device=torch.device("cuda"))
     buf = core.Buffer(args.nsteps, args.nenvs)
     main_model = model.Model().to(torch.device("cuda"))
     pv_model = model.FinalModel().to(torch.device("cuda"))
     params = list(main_model.parameters())+list(pv_model.parameters())
-    optimizer = torch.optim.AdamW(params, 1e-5)
+    optimizer = torch.optim.AdamW(params, args.lr)
     if args.load:
         checkpoint = torch.load(args.path, weights_only=True)
         main_model.load_state_dict(checkpoint['model_state_dict'])
@@ -65,23 +65,24 @@ def main():
             returns, advs = core.calc_gae(
                 buf, torch.stack((next_val1, next_val2)),
                 torch.tensor(done, device=torch.device("cuda")))
-        print("adv max {:.4f} min {:.4f}".format(advs.max(), advs.min()))
+        print("adv max {:.4f} min {:.4f}, mean return {:.3f}".format(advs.max(), advs.min(), returns.mean()))
         flat_obs, flat_buf = buf.flatten()
-        for i in range(args.nepoch):
+        for _ in range(args.nepoch):
             arr = np.arange(args.nenvs*args.nsteps * 2)
             order = np.delete(arr, [0, args.nenvs*args.nsteps])
             np.random.shuffle(order)
             start = 0
-            for j in range(args.nminibatch):
+            for _ in range(args.nminibatch):
                 sli = order[start:start+args.samplesperbatch]
                 start += args.samplesperbatch
 
-                acs, log_prob, vals = map(lambda x: x[sli], flat_buf[:3])
+                acs, log_prob, vals = map(
+                    lambda x: x[sli].detach(), flat_buf[:3])
                 with torch.no_grad():
-                    latents_last = [main_model(o[sli-1] for o in ob)
+                    latents_last = [main_model(o[sli-1] for o in ob).detach()
                                     for ob in zip(*flat_obs)]
                 mem_last = flat_buf[-1][sli-1]
-                _, _, mem = pv_model(*latents_last, mem_last)
+                mem = pv_model(*latents_last, mem_last, True)
                 latents = [main_model(o[sli] for o in ob)
                            for ob in zip(*flat_obs)]
                 logits, new_values, _ = pv_model(*latents, mem)
@@ -118,12 +119,13 @@ def main():
         ev = 1-(returns-val).var() / \
             returns.var() if returns.var() != 0 else np.nan
         print(f"{pg_loss=:.4f} {v_loss=:.4f} {entropy_loss=:.4f} {ev=:.2f}")
-        if i % 10 == 0:
+        if (i % 10) == 0:
             torch.save({
                 'model_state_dict': main_model.state_dict(),
                 'model2_state_dict': pv_model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
             }, args.path)
+            print("saved")
 
 
 if __name__ == "__main__":

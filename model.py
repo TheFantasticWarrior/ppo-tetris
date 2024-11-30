@@ -12,36 +12,33 @@ class Model(nn.Module):
     def __init__(self, ff_size=ff_size, d_model=d_model):
         super(Model, self).__init__()
         self.d_model = d_model
-        self.loc_embedding = nn.Linear(3, 128)
-        self.loc_embedding2 = nn.Linear(128, d_model)
+        self.loc_embedding = nn.Linear(3, 16)
+        self.loc_embedding2 = nn.Linear(16, d_model)
         self.piece_embedding = nn.Embedding(8, d_model)
         self.rotation_embedding = nn.Linear(d_model, d_model*4)
 
         self.garbage_embedding = nn.Conv1d(
-            in_channels=1, out_channels=64, kernel_size=3, padding=1)
+            in_channels=1, out_channels=ff_size, kernel_size=3, padding=1)
         self.garbage_embedding2 = nn.Linear(10, seq_len)
 
-        self.q_linear = nn.ModuleList(
-            [nn.Linear(ff_size, d_model) for _ in range(8)])
-        self.k_linear = nn.ModuleList(
-            [nn.Linear(d_model, d_model//4) for _ in range(8)])
-        self.v_linear = nn.ModuleList(
-            [nn.Linear(d_model, d_model//4) for _ in range(8)])
-        self.qkv_linear = nn.ModuleList(
-            [nn.Linear(d_model, ff_size) for _ in range(8)])
-        self.attn_bias = nn.ModuleList(
-            [Bias_Layer(seq_len*ff_size, seq_len) for _ in range(7)] +
-            [Bias_Layer(seq_len*ff_size, seq_len*7)])
+        self.q_linear = nn.Linear(ff_size, d_model)
+        self.k_linear = nn.Linear(d_model, d_model//4)
+        self.v_linear = nn.Linear(d_model, d_model//4)
+        self.qkv_linear = nn.Linear(d_model, ff_size)
+        self.attn_bias = Bias_Layer(ff_size, seq_len, 1)
 
-        self.queue_linear = nn.ModuleList(
-            [nn.Linear(ff_size, ff_size) for _ in range(7)])
+        self.queue_linear = nn.Linear(ff_size, ff_size)
+        self.attn_norm = nn.LayerNorm(ff_size)
+        self.ff_norm = nn.LayerNorm(ff_size)
+
+        self.final_attn_bias = Bias_Layer(ff_size, seq_len, 7)
         self.remain_linear = nn.Linear(ff_size, ff_size)
-        self.attn_norm = nn.ModuleList(
-            [nn.LayerNorm(ff_size) for _ in range(8)])
-        self.ff_norm = nn.ModuleList([nn.LayerNorm(ff_size) for _ in range(8)])
+        self.final_attn_norm = nn.LayerNorm(ff_size)
+        self.final_ff_norm = nn.LayerNorm(ff_size)
 
         self.CNN = SimpleCNN(ff_size)
 
+        self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
         self.last_linear = nn.Linear(ff_size, d_model)
 
         self.p_encode = PositionalEncoding(ff_size)
@@ -77,17 +74,17 @@ class Model(nn.Module):
 
         state = board_with_position+garbage_processed
 
-        def attn(state, pieces, i):
+        def attn(state, pieces, attn_layer):
             num_heads = 8
             d_head = self.d_model // num_heads
             # Linear transformations
-            q = self.q_linear[i](state).view(batch_size, seq_len,
-                                             num_heads, d_head)
-            k = self.k_linear[i](pieces).view(
+            q = self.q_linear(state).view(batch_size, seq_len,
+                                          num_heads, d_head)
+            k = self.k_linear(pieces).view(
                 batch_size, -1, num_heads, d_head)
-            v = self.v_linear[i](pieces).view(
+            v = self.v_linear(pieces).view(
                 batch_size, -1, num_heads, d_head)
-            bias = self.attn_bias[i](state.view(batch_size, -1)).view(
+            bias = attn_layer(state).view(
                 batch_size, num_heads, seq_len, k.size(1)).transpose(1, 2)
 
             # Scaled dot-product attention
@@ -98,25 +95,27 @@ class Model(nn.Module):
 
             # Combine heads
             output = output.view(batch_size, seq_len, self.d_model)
-            return self.qkv_linear[i](output)
+            return self.qkv_linear(output)
 
         for i in range(7):
-            new_state = attn(state, pieces_visible[:, i:i+1], i)
-            state = self.attn_norm[i](state+new_state)
+            new_state = attn(state, pieces_visible[:, i:i+1], self.attn_bias)
+            state = self.attn_norm(state+new_state)
 
-            new_state = self.queue_linear[i](state)
-            state = self.ff_norm[i](state+new_state)
-        new_state = attn(state, pieces_not_visible, 7)
-        state = self.attn_norm[-1](state+new_state)
+            new_state = self.queue_linear(state)
+            state = self.ff_norm(state+new_state)
+        new_state = attn(state, pieces_not_visible, self.final_attn_bias)
+        state = self.final_attn_norm(state+new_state)
 
         new_state = self.remain_linear(state)
-        state = self.ff_norm[-1](state+new_state)
+        state = self.final_ff_norm(state+new_state)
+        state = state.view(batch_size, 20, 10, ff_size)
+        state = self.pool(state).view(batch_size, 50, ff_size)
         state = self.last_linear(state)
         return state
 
 
 class FinalModel(nn.Module):
-    def __init__(self, ff_size=128, d_model=d_model):
+    def __init__(self, ff_size=ff_size, d_model=d_model):
         super(FinalModel, self).__init__()
         self.d_model = d_model
         self.attn1 = nn.MultiheadAttention(d_model, 8, batch_first=True)
@@ -125,20 +124,24 @@ class FinalModel(nn.Module):
             d_model=d_model, nhead=8, dim_feedforward=ff_size,
             batch_first=True, num_encoder_layers=3, num_decoder_layers=0
         ).encoder
-        self.linear = nn.Linear(d_model*200, ff_size)
+        self.linear = nn.Linear(d_model, ff_size)
         self.policy = nn.Linear(ff_size, 10)
         self.value = nn.Linear(ff_size, 1)
-        self.memory = nn.Linear(seq_len, 8)
+        self.memory = nn.Linear(50, 4)
 
-    def forward(self, x, y, retain):
+    def forward(self, x, y, retain, mem_only=False):
         batch_size = x.size(0)
         combined, _ = self.attn1(x, y, y)
         x = combined+x
         x_mem_combined, _ = self.attn2(x, retain, retain)
         x = x_mem_combined+x
         x = self.t_encoder(x)
+        if mem_only:
+            x = x.detach()
         memory = self.memory(x.swapaxes(1, 2)).swapaxes(1, 2)
-        x = self.linear(x.view(batch_size, -1))
+        if mem_only:
+            return memory
+        x = self.linear(x.amax(1))
         logits = self.policy(x)
         value = self.value(x).squeeze()
         return logits, value, memory
@@ -169,17 +172,21 @@ class PositionalEncoding(nn.Module):
 
 
 class Bias_Layer(nn.Module):
-    def __init__(self, in_size, out_size):
+    def __init__(self, in_size, seq_len, out_len):
         super(Bias_Layer, self).__init__()
+        self.hidden_size = 128
         self.relu6 = nn.ReLU6()
-        self.linear1 = nn.Linear(in_size, 32, bias=False)
-        self.linear2 = nn.Linear(32, 256)
-        self.layernorm1 = nn.LayerNorm(256)
-        self.linear3 = nn.Linear(256, 256*8)
-        self.layernorm2 = nn.LayerNorm(256)
-        self.linear4 = nn.Linear(256, out_size)
+        self.linear0 = nn.Linear(in_size, 4, bias=False)
+        self.linear1 = nn.Linear(4*seq_len, 32, bias=False)
+        self.linear2 = nn.Linear(32, self.hidden_size)
+        self.layernorm1 = nn.LayerNorm(self.hidden_size)
+        self.linear3 = nn.Linear(self.hidden_size, self.hidden_size*8)
+        self.layernorm2 = nn.LayerNorm(self.hidden_size)
+        self.linear4 = nn.Linear(self.hidden_size, seq_len*out_len)
+        self.seq_len = seq_len
 
     def forward(self, x):
+        x = self.linear0(x).view(-1, 4*self.seq_len)
         x = self.linear1(x)
         x = self.relu6(x)
 
@@ -187,7 +194,7 @@ class Bias_Layer(nn.Module):
         x = self.layernorm1(x)
         x = self.relu6(x)
 
-        x = self.linear3(x).view(-1, 8, 256)
+        x = self.linear3(x).view(-1, 8, self.hidden_size)
         x = self.layernorm2(x)
         x = self.relu6(x)
 
