@@ -11,21 +11,27 @@ def main():
     env = mp.manager(args.nenvs, args.seed, args.render)
 
     obs = env.reset()
-    done = torch.zeros(args.nenvs, dtype=bool)
+    done = np.zeros(args.nenvs, dtype=bool)
     mem0 = torch.zeros((args.nenvs, 4, args.d_model),
                        device=torch.device("cuda"))
     mem1 = torch.zeros((args.nenvs, 4, args.d_model),
                        device=torch.device("cuda"))
     buf = core.Buffer(args.nsteps, args.nenvs)
     main_model = model.Model().to(torch.device("cuda"))
-    pv_model = model.FinalModel().to(torch.device("cuda"))
-    params = list(main_model.parameters())+list(pv_model.parameters())
+    params = main_model.parameters()
     optimizer = torch.optim.AdamW(params, args.lr)
     if args.load:
         checkpoint = torch.load(args.path, weights_only=True)
-        main_model.load_state_dict(checkpoint['model_state_dict'])
-        pv_model.load_state_dict(checkpoint['model2_state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        if args.partial:
+            ms = checkpoint['model_state_dict']
+            model_dict = main_model.state_dict()
+            pretrained_dict = {k: v for k, v in ms.items() if k in model_dict}
+            model_dict.update(pretrained_dict)
+            main_model.load_state_dict(model_dict)
+
+        else:
+            main_model.load_state_dict(checkpoint['model_state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         del checkpoint
     for i in range(args.iterations):
         for step in range(args.nsteps):
@@ -36,12 +42,11 @@ def main():
             buf.memory[0, step][~done] = mem0
             buf.memory[1, step][~done] = mem1
             with torch.no_grad():
-                p1_latent = main_model([ob[0, step] for ob in buf.obs])
-                p2_latent = main_model([ob[1, step] for ob in buf.obs])
-                p1_logit, buf.values[0, step], mem0 = pv_model(
-                    p1_latent, p2_latent, mem0)
-                p2_logit, buf.values[1, step], mem1 = pv_model(
-                    p2_latent, p1_latent, mem1)
+                p1_logit, buf.values[0, step] = main_model(
+                    [ob[0, step] for ob in buf.obs])
+                p2_logit, buf.values[1, step] = main_model(
+                    [ob[1, step] for ob in buf.obs])
+
             buf.actions[0, step], buf.logprob[0, step] = core.sample(p1_logit)
             buf.actions[1, step], buf.logprob[1, step] = core.sample(p2_logit)
 
@@ -51,21 +56,19 @@ def main():
             buf.rews[:, step] = torch.tensor(rew)
         count = max(1, env.count)
         print(f"iteration {i}, {env.count} games, {env.lines/count:.2f} lines, {env.atk /
-              count:.2f} atk, {buf.rews.sum().cpu().numpy()/count:.4f} rewards avg")
+              count:.2f} atk, {buf.rews.sum().cpu().numpy():.4f} rewards total")
         env.reset_data()
         with torch.no_grad():
-            p1_latent = main_model(
+            _, next_val1 = main_model(
                 [torch.tensor(ob[0], device=torch.device("cuda")) for ob in obs])
-            p2_latent = main_model(
+            _, next_val2 = main_model(
                 [torch.tensor(ob[1], device=torch.device("cuda")) for ob in obs])
-            _, next_val1, _ = pv_model(
-                p1_latent, p2_latent, mem0)
-            _, next_val2, _ = pv_model(
-                p2_latent, p1_latent, mem1)
+
             returns, advs = core.calc_gae(
                 buf, torch.stack((next_val1, next_val2)),
                 torch.tensor(done, device=torch.device("cuda")))
-        print("adv max {:.4f} min {:.4f}, mean return {:.3f}".format(advs.max(), advs.min(), returns.mean()))
+        print("return max {:.4f} min {:.4f}, mean{:.3f}".format(
+            returns.max(), returns.min(), returns.mean()))
         flat_obs, flat_buf = buf.flatten()
         for _ in range(args.nepoch):
             arr = np.arange(args.nenvs*args.nsteps * 2)
@@ -78,14 +81,8 @@ def main():
 
                 acs, log_prob, vals = map(
                     lambda x: x[sli].detach(), flat_buf[:3])
-                with torch.no_grad():
-                    latents_last = [main_model(o[sli-1] for o in ob).detach()
-                                    for ob in zip(*flat_obs)]
-                mem_last = flat_buf[-1][sli-1]
-                mem = pv_model(*latents_last, mem_last, True)
-                latents = [main_model(o[sli] for o in ob)
-                           for ob in zip(*flat_obs)]
-                logits, new_values, _ = pv_model(*latents, mem)
+
+                logits, new_values = main_model([o[sli] for o in flat_obs])
                 entropy, new_log_prob = core.entropy_and_logprob(logits, acs)
                 ratio = torch.exp(new_log_prob-log_prob)
                 adv = advs[sli]
@@ -119,10 +116,9 @@ def main():
         ev = 1-(returns-val).var() / \
             returns.var() if returns.var() != 0 else np.nan
         print(f"{pg_loss=:.4f} {v_loss=:.4f} {entropy_loss=:.4f} {ev=:.2f}")
-        if (i % 10) == 0:
+        if (i % 5) == 0 and i > 1:
             torch.save({
                 'model_state_dict': main_model.state_dict(),
-                'model2_state_dict': pv_model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
             }, args.path)
             print("saved")

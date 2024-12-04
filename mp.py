@@ -67,6 +67,7 @@ def gather_data(remote, parent_remote, render, seed):
     parent_remote.close()
     game = tetris.Container()
     game.seed_reset(seed[0])
+    old_filled = np.array(game.check_filled())
     if render:
         r = tetris.Renderer(1, 10)
     try:
@@ -76,13 +77,21 @@ def gather_data(remote, parent_remote, render, seed):
             if cmd == 'step':
                 game.step(*action)
                 x, done, rew = game.get_state()
+                # filled = np.array(game.check_filled())
+                # filled_diff = filled-old_filled
+                # old_filled = filled
+                # rew = [rew[i]+(((filled_diff[i]) +
+                #        np.sign(filled[i] - 0.5))*0.0001
+                #        if action[i] == 1 else 0)
+                #        for i in range(2)]
                 if render:
                     r.render(game)
-                    # if rew[0]!=0:
-                    #     print(f"{rew[0]:.2f}")
+                # if rew[0]<-0.002:
+                #     print(f"{rew[0]:.4f}")
                 if done:
                     info = game.reset()
                     x, _, _ = game.get_state()
+                    # old_filled = np.array(game.check_filled())
                 else:
                     info = None
                 remote.send((x, rew, done, info))
