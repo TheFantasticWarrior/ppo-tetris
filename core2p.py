@@ -15,7 +15,7 @@ class Buffer:
                         torch.device("cuda"))
                     ]
         self.memory = torch.zeros(
-            (2, nsteps, nenvs, args.ff_size), dtype=torch.float32).to(torch.device("cuda"))
+            (2, nsteps, nenvs, 6, args.d_model), dtype=torch.float32).to(torch.device("cuda"))
         self.done = torch.zeros((nsteps, nenvs)).to(torch.device("cuda"))
         self.rews = torch.zeros((2, nsteps, nenvs)).to(torch.device("cuda"))
         self.actions = torch.zeros((2, nsteps, nenvs)).to(torch.device("cuda"))

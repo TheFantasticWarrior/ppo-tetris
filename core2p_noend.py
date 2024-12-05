@@ -56,7 +56,7 @@ def calc_gae(buf, next_vals, last_done, gamma=args.gamma, gae_lambda=0.95):
             nextvalues = next_vals
         else:
             nextvalues = buf.values[:, t + 1]
-        nextnonterminal = nextvalues != -1
+        nextnonterminal = buf.rews[:, t+1] != -1
         delta = buf.rews[:, t] + gamma * nextvalues * \
             nextnonterminal - buf.values[:, t]
         advantages[:, t] = lastgaelam = delta + gamma *\

@@ -26,9 +26,12 @@ def main(lr):
     env = mp.manager(args.nenvs, args.seed, args.render)
 
     obs = env.reset()
-    done = torch.ones(args.nenvs, dtype=bool)
+    done = np.zeros(args.nenvs, dtype=bool)
+    mem0 = torch.zeros((args.nenvs, args.d_model),
+                       device=torch.device("cuda"))
+    mem1 = torch.zeros((args.nenvs, args.d_model),
+                       device=torch.device("cuda"))
     buf = core.Buffer(args.nsteps, args.nenvs)
-    mem0 = mem1 = buf.memory[0, 0].clone()
     pv_model = model.MacroModel().to(torch.device("cuda"))
     optimizer = torch.optim.AdamW(pv_model.parameters(), lr)
     lr_scheduler = torch.optim.lr_scheduler.LambdaLR(
@@ -42,7 +45,6 @@ def main(lr):
     iteration_data = {'iteration': [],
                       'returns_mean': [],
                       'total rewards': [],
-                      'var rewards': [],
                       'explained variance': [],
                       'lines': [],
                       'atk': []
@@ -66,46 +68,46 @@ def main(lr):
     for i in range(args.iterations):
         for step in range(args.nsteps):
             buf.record_obs(step, obs)
+            done = torch.tensor(done)
             buf.done[step] = done
 
-            buf.memory[0, step] = mem0
-            buf.memory[1, step] = mem1
+            buf.memory[0, step][~done] = mem0
+            buf.memory[1, step][~done] = mem1
             with torch.no_grad():
                 (p1_logit, buf.values[0, step], mem0)\
                     = pv_model([ob[0, step] for ob in buf.obs],
                                [ob[1, step] for ob in buf.obs],
-                               mem0, done)
+                               mem0)
                 (p2_logit, buf.values[1, step], mem1)\
                     = pv_model([ob[1, step] for ob in buf.obs],
                                [ob[0, step] for ob in buf.obs],
-                               mem1, done)
+                               mem1)
             buf.actions[0, step], buf.logprob[0, step] = core.sample(p1_logit)
             buf.actions[1, step], buf.logprob[1, step] = core.sample(p2_logit)
 
             env.send(buf.actions[:, step].int().cpu().numpy().T)
 
             obs, done, rew = env.recv()
-            done = torch.tensor(done, device=torch.device("cuda"))
             buf.rews[:, step] = torch.tensor(rew)
         count = max(1, env.count)
         sum_rews = buf.rews[:, ~buf.done.bool()].mean().item()
-        rews_var = buf.rews.var().item()
         kpp = args.nenvs*args.nsteps*2/(buf.actions == 1).sum().item()
         print(f"iteration {i}, {kpp=:.2f}, {env.count} deaths," +
               f"{env.lines/count:.2f} lines, {env.atk / count:.2f} atk, " +
-              f"{sum_rews:.4f} rewards total, {rews_var=:.4f}")
+              f"{sum_rews:.4f} rewards total")
         # print(buf.actions.cpu().numpy()[0,:,0])
         with torch.no_grad():
             _, next_val1, _\
                 = pv_model([ob[0, step] for ob in buf.obs],
                            [ob[1, step] for ob in buf.obs],
-                           mem0, done)
+                           mem0)
             _, next_val2, _\
                 = pv_model([ob[1, step] for ob in buf.obs],
                            [ob[0, step] for ob in buf.obs],
-                           mem1, done)
+                           mem1)
             returns, advs = core.calc_gae(
-                buf, torch.stack((next_val1, next_val2)), done)
+                buf, torch.stack((next_val1, next_val2)),
+                torch.tensor(done, device=torch.device("cuda")))
         flat_obs, flat_buf = buf.flatten()
         for epoch in range(args.nepoch):
             arr = np.arange(args.nenvs*args.nsteps * 2)
@@ -118,26 +120,23 @@ def main(lr):
 
                 acs, log_prob, vals = map(
                     lambda x: x[sli], flat_buf[:3])
-                dones = buf.done.expand(2, -1, -1).flatten().bool()
-                mem = pv_model([ob[0][sli-1] for ob in flat_obs],
-                               [ob[1][sli-1] for ob in flat_obs],
-                               flat_buf[-1][sli-1],
-                               dones[sli-1], dones[sli])
-                logits, new_values, _ =\
-                    pv_model([ob[0][sli] for ob in flat_obs],
-                             [ob[1][sli] for ob in flat_obs],
-                             mem, dones[sli])
-                if args.debug_acs and epoch==0 and minibatch==0:
-                    with torch.no_grad():
-                        action_probs = torch.softmax(logits, dim=-1)
-                        variances = action_probs.var(dim=0).mean().item()
-                        print(f"[INFO] Mean action probability variance: {
-                              variances:.4e}")
-
-                        # Optionally: check if actions are dominated by one policy
-                        max_probs = action_probs.max(dim=-1).values
-                        print(f"[INFO] Mean max action probability: {
-                              max_probs.mean().item():.4e}")
+                # dones = buf.done.expand(2, -1, -1).flatten()[sli-1].bool()
+                # mem = pv_model([ob[0][sli-1] for ob in flat_obs],
+                #                [ob[1][sli-1] for ob in flat_obs],
+                #                flat_buf[-1][sli-1], dones)
+                logits, new_values, _ = pv_model([ob[0][sli] for ob in flat_obs], [
+                                                 # flat_buf[-1][sli])
+                                                 ob[1][sli] for ob in flat_obs], None)
+                # with torch.no_grad():
+                #     action_probs = torch.softmax(logits, dim=-1)
+                #     variances = action_probs.var(dim=0).mean().item()
+                #     print(f"[INFO] Mean action probability variance: {
+                #           variances:.4e}")
+                #
+                #     # Optionally: check if actions are dominated by one policy
+                #     max_probs = action_probs.max(dim=-1).values
+                #     print(f"[INFO] Mean max action probability: {
+                #           max_probs.mean().item():.4e}")
                 # print(logits.mean(),logits.max(),logits.min())
                 entropy, new_log_prob = core.entropy_and_logprob(logits, acs)
                 ratio = torch.exp(new_log_prob-log_prob)
@@ -186,7 +185,6 @@ def main(lr):
             returns.var() if returns.var() != 0 else np.nan
         new_iteration_data = {'iteration': i,
                               'returns_mean': returns.mean().item(),
-                              'var rewards': rews_var,
                               'total rewards': sum_rews,
                               'explained variance': ev.item(),
                               'lines': env.lines/count,

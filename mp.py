@@ -77,13 +77,16 @@ def gather_data(remote, parent_remote, render, seed):
             if cmd == 'step':
                 game.step(*action)
                 x, done, rew = game.get_state()
-                # filled = np.array(game.check_filled())
-                # filled_diff = filled-old_filled
-                # old_filled = filled
-                # rew = [rew[i]+(((filled_diff[i]) +
-                #        np.sign(filled[i] - 0.5))*0.0001
-                #        if action[i] == 1 else 0)
-                #        for i in range(2)]
+                if 1 in action:
+                    filled = np.array(game.check_filled())
+                    filled_diff = filled-old_filled
+                    old_filled = filled
+                    bonus = np.where(filled >= 0.8, 0.5, filled_diff)
+
+                    rew = [rew[i]+(bonus[i] if (action[i] == 1) else 0)
+                           for i in range(2)]
+                    # if render:
+                    #     print(filled_diff)
                 if render:
                     r.render(game)
                 # if rew[0]<-0.002:
@@ -91,7 +94,7 @@ def gather_data(remote, parent_remote, render, seed):
                 if done:
                     info = game.reset()
                     x, _, _ = game.get_state()
-                    # old_filled = np.array(game.check_filled())
+                    old_filled = np.array(game.check_filled())
                 else:
                     info = None
                 remote.send((x, rew, done, info))

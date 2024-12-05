@@ -3,12 +3,15 @@ import pandas as pd
 
 
 def window_avg(data, window_width=32):
-    ravgs = [sum(data[i*window_width:(i+1)*window_width]) / window_width for i in range(len(data)//window_width)]
+    ravgs = [sum(data[i*window_width:(i+1)*window_width]) /
+             window_width for i in range(len(data)//window_width)]
     return ravgs
-def plot_loss_data(lr,df_losses, df_data, step_column_losses, step_column_data):
+
+
+def plot_loss_data(lr, df_losses, df_data, step_column_losses, step_column_data):
     # Define the number of subplots
     num_rows = 3  # Assuming two DataFrames to plot
-    num_columns = 3  # Adjust if needed
+    num_columns = 4  # Adjust if needed
 
     # Create subplots
     fig, axs = plt.subplots(num_rows, num_columns, figsize=(15, 10))
@@ -16,15 +19,20 @@ def plot_loss_data(lr,df_losses, df_data, step_column_losses, step_column_data):
     fig.suptitle(lr)
     # Flatten the axs array for easy iteration
     axs = axs.flatten()
-
+    steps_data = df_data[step_column_data]
+    length = len(steps_data)
+    if length > 50:
+        window=length//50
+    else:
+        window=1
     # Plot the first DataFrame
     steps_losses = df_losses[step_column_losses]
     columns_to_plot_losses = [
         col for col in df_losses.columns if col != step_column_losses]
     for i, column in enumerate(columns_to_plot_losses):
-        loss=window_avg(df_losses[column],args.nepoch*args.nminibatch)
-        #loss=df_losses[column]
-        axs[i].plot(loss, label=column)
+        loss = window_avg(df_losses[column], args.nepoch*args.nminibatch*window)
+        # loss=df_losses[column]
+        axs[i].plot(steps_losses[::window][:len(loss)], loss, label=column)
         axs[i].set_title(f'{column} vs. {step_column_losses}')
         axs[i].set_xlabel(step_column_losses)
         axs[i].set_ylabel(column)
@@ -34,12 +42,16 @@ def plot_loss_data(lr,df_losses, df_data, step_column_losses, step_column_data):
         axs[i].legend()
 
     # Plot the second DataFrame
-    steps_data = df_data[step_column_data]
     columns_to_plot_data = [
         col for col in df_data.columns if col != step_column_data]
     start_index = len(columns_to_plot_losses)
     for i, column in enumerate(columns_to_plot_data, start=start_index):
-        axs[i].plot(steps_data, df_data[column], label=column)
+        length = len(steps_data)
+        if window!=1:
+            data = window_avg(df_data[column], window)
+        else:
+            data = df_data[column]
+        axs[i].plot(steps_data[::window][:len(data)], data, label=column)
         axs[i].set_title(f'{column} vs. {step_column_data}')
         axs[i].set_xlabel(step_column_data)
         axs[i].set_ylabel(column)
@@ -61,10 +73,12 @@ def save_plot(lr):
     df_data = pd.read_feather("data.feather")
 
 # Plot the DataFrames separately within the same image
-    plot_loss_data(lr,df_losses, df_data, 'step', 'iteration')
+    plot_loss_data(lr, df_losses, df_data, 'step', 'iteration')
     plt.savefig(f"{lr}.png")
     plt.clf()
-if __name__=="__main__":
+
+
+if __name__ == "__main__":
 
     import args
     df_losses = pd.read_feather("losses.feather")

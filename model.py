@@ -20,44 +20,49 @@ class Model3(nn.Module):
         self.piece_embedding = nn.Embedding(8, d_model)
         self.rotation_embedding = nn.Linear(d_model, d_model*4)
 
-
+        self.CNN = SimpleCNN(d_model)
+        self.piece_board_attn = AttnWithBias(seq_len, 56, d_model, 4)
         # Separate layers for each decoder
-        macro_decoder_layer = nn.TransformerDecoderLayer(
-            d_model=d_model, dim_feedforward=ff_size, nhead=4, batch_first=True)
-        board_decoder_layer = nn.TransformerDecoderLayer(
-            d_model=d_model, dim_feedforward=ff_size, nhead=4, batch_first=True)
-        movement_decoder_layer = nn.TransformerDecoderLayer(
-            d_model=d_model, dim_feedforward=ff_size, nhead=4, batch_first=True)
+        macro_layer = nn.TransformerDecoderLayer(
+            d_model=d_model, dim_feedforward=ff_size,
+            nhead=4, batch_first=True)
+        board_layer = nn.TransformerDecoderLayer(
+            d_model=d_model, dim_feedforward=ff_size,
+            nhead=4, batch_first=True)
+        movement_layer = nn.TransformerDecoderLayer(
+            d_model=d_model, dim_feedforward=ff_size,
+            nhead=4, batch_first=True)
 
         # Separate decoders with their own layers
         self.macro_decoder = nn.TransformerDecoder(
-            macro_decoder_layer, num_layers=2)
+            macro_layer, num_layers=2)
         self.board_decoder = nn.TransformerDecoder(
-            board_decoder_layer, num_layers=2)
+            board_layer, num_layers=2)
         self.movement_decoder = nn.TransformerDecoder(
-            movement_decoder_layer, num_layers=3)
+            movement_layer, num_layers=2)
 
-
-        self.CNN = SimpleCNN(d_model)
         self.p_encode = PositionalEncoding2D(d_model, 20, 10)
 
-        self.final_linear = nn.Linear(d_model+ff_size, ff_size)
-        self.final_linear2 = nn.Linear(ff_size, d_model)
-        self.final_norm = nn.LayerNorm(d_model)
-        self.policy = MLP((d_model, ff_size, 10))
-        self.value = nn.Linear(d_model, ff_size)
+        self.final_linear = nn.Linear(d_model, ff_size)
+        self.final_linear2 = nn.Linear(ff_size, ff_size)
+        self.final_norm = nn.LayerNorm(ff_size)
+        self.policy = MLP((ff_size, ff_size, 10))
+        self.value = nn.Linear(ff_size, ff_size)
 
-    def forward(self, x, state_in=0, memory=0):
+    def forward(self, x, state_in):
         xyrot, queue, remains, board, _ = x
         batch_size = queue.size(0)
 
-        loc = self.loc_embedding(xyrot)
+        default_pos = torch.full(
+            (batch_size, 13, 4), -1, device=torch.device("cuda"))
+        pos = torch.cat((xyrot.unsqueeze(1), default_pos), 1)
+        loc = self.loc_embedding(pos)
         loc = self.relu6(loc)
         loc_processed = self.loc_embedding2(loc)
 
         pieces = torch.cat((queue, remains), 1)
         pieces_processed = self.piece_embedding(pieces)
-        current = pieces_processed[:, 0] + loc_processed
+        pieces_processed = pieces_processed + loc_processed
         pieces_processed = self.ppos(pieces_processed)
         pieces_with_rotations = self.rotation_embedding(
             pieces_processed).view(batch_size, -1, d_model)
@@ -67,36 +72,35 @@ class Model3(nn.Module):
         board_with_position = self.p_encode(
             board_processed).flatten(-2).swapaxes(-1, -2).contiguous()
         assert board_with_position.shape[1:] == (seq_len, d_model)
+        pb = self.piece_board_attn(
+            board_with_position,
+            pieces_with_rotations)
 
-        if isinstance(state_in,int):
-            state=board_with_position
-        else:
-            state_in = state_in.unsqueeze(1)
-            state = self.macro_decoder(board_with_position, state_in)
+        state = self.macro_decoder(pb, state_in)
 
         new_state = self.board_decoder(
             state, pieces_with_rotations)
 
-        state=state+new_state
-        current = current.unsqueeze(1)
-        x = self.movement_decoder(current, state).view(batch_size, d_model)
-        x=x+loc_processed
-        if isinstance(memory,int):
-            memory=torch.zeros((batch_size,ff_size),device=torch.device("cuda"))
-        x = torch.cat((x, memory), 1)
+        state = new_state  # state+new_state
+        x = self.movement_decoder(pieces_processed[:,:1], state
+                                  )
+        x = x.view(batch_size, d_model)
+        # x = x+loc_processed
+
         x = self.final_linear(x)
         x = self.relu6(x)
-        x = self.final_linear2(x)+loc_processed
-        x=self.final_norm(x)
+        x = self.final_linear2(x)+x
+        x = self.final_norm(x)
 
         logits = self.policy(x)
         value_latent = self.relu6(self.value(x))
         return logits, value_latent
 
+
 class NoMacroModel(nn.Module):
     def __init__(self, ff_size=ff_size, d_model=d_model):
         super(NoMacroModel, self).__init__()
-        
+
         self.value = MLP((ff_size, ff_size,  1))
         self.model = Model3()
 
@@ -106,7 +110,8 @@ class NoMacroModel(nn.Module):
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
             elif isinstance(module, nn.Embedding):
-                nn.init.normal_(module.weight, mean=0, std=np.sqrt(1. / module.weight.size(1)))
+                nn.init.normal_(module.weight, mean=0,
+                                std=np.sqrt(1. / module.weight.size(1)))
         nn.init.orthogonal_(self.model.policy.layers[-1].weight, 0.1)
         nn.init.orthogonal_(self.value.layers[-1].weight, 1)
 
@@ -116,6 +121,7 @@ class NoMacroModel(nn.Module):
         final_value = self.value(value).squeeze()
         return policy, final_value, 0
 
+
 class MacroModel(nn.Module):
     def __init__(self, ff_size=ff_size, d_model=d_model):
         super(MacroModel, self).__init__()
@@ -124,17 +130,31 @@ class MacroModel(nn.Module):
         self.queue_linear = nn.Linear(14, ff_size)
         self.piece_embedding = nn.Embedding(8, ff_size)
         self.ppos = PositionalEncoding(ff_size, max_len=7)
-        self.garbage_embedding = nn.Conv1d(
-            in_channels=1, out_channels=ff_size, kernel_size=3, padding=1)
-        self.garbage_embedding2 = nn.Linear(10, 32)
+        self.garbage_embedding1 = nn.Conv1d(
+            in_channels=1, out_channels=d_model, kernel_size=3, padding=1, stride=3)
+        self.garbage_embedding2 = nn.Conv1d(
+            in_channels=d_model, out_channels=ff_size, kernel_size=2, padding=1, stride=2)
+        self.garbage_embedding3 = nn.Conv1d(
+            in_channels=ff_size, out_channels=ff_size, kernel_size=2, stride=2)
 
         self.own_attn = nn.MultiheadAttention(ff_size, 8, batch_first=True)
         self.opp_attn = nn.MultiheadAttention(ff_size, 8, batch_first=True)
 
-        self.mlp = MLP((ff_size*4, ff_size, ff_size))
-        self.latent = nn.Linear(ff_size, d_model)
-        self.memory = MLP((ff_size, ff_size, ff_size))
-        self.macro_value = nn.Linear(ff_size, ff_size)
+        self.mlp = MLP((ff_size*3, ff_size, 4*d_model))
+        self.latent = nn.Linear(d_model, d_model)
+        self.initial_tokens = nn.Parameter(torch.randn(6, d_model))
+        memory_layer = nn.TransformerDecoderLayer(
+            d_model=d_model, dim_feedforward=ff_size,
+            nhead=4, batch_first=True)
+        self.memory_decoder = nn.TransformerDecoder(
+            memory_layer, num_layers=2)
+        state_layer = nn.TransformerDecoderLayer(
+            d_model=d_model, dim_feedforward=ff_size,
+            nhead=4, batch_first=True)
+        self.state_decoder = nn.TransformerDecoder(
+            state_layer, num_layers=2)
+        self.mem_gate = MLP((d_model, ff_size, d_model))
+        self.macro_value = nn.Linear(d_model, ff_size)
         self.value = MLP((ff_size*2, ff_size,  1))
         self.model = Model3()
 
@@ -144,11 +164,12 @@ class MacroModel(nn.Module):
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
             elif isinstance(module, nn.Embedding):
-                nn.init.normal_(module.weight, mean=0, std=np.sqrt(1. / module.weight.size(1)))
+                nn.init.normal_(module.weight, mean=0,
+                                std=np.sqrt(1. / module.weight.size(1)))
         nn.init.orthogonal_(self.model.policy.layers[-1].weight, 0.01)
         nn.init.orthogonal_(self.value.layers[-1].weight, 1)
 
-    def forward(self, x, y, memory, mask=None):
+    def forward(self, x, y, memory, mask, out_mask=None):
         _, queue, remains, board, garbage = x
         _, opp_q, opp_remain, opp_board, _ = y
         batch_size = queue.size(0)
@@ -161,33 +182,38 @@ class MacroModel(nn.Module):
         opp_p = self.piece_embedding(opp_pieces)
         opp_p = self.ppos(opp_p)
 
-        garbage_processed = self.garbage_embedding(
+        garbage_processed = self.garbage_embedding1(
             garbage.unsqueeze(1).float())
         garbage_processed = self.garbage_embedding2(
             garbage_processed
-        ).amax(-1)
+        )
+        garbage_processed = self.garbage_embedding3(
+            garbage_processed
+        ).view(batch_size, ff_size)
         own_board = self.cnn(board.unsqueeze(1)).view(
-            batch_size, ff_size, -1).amax(-1)
+            batch_size, ff_size, -1).swapaxes(1, 2)
         own_state, _ = self.own_attn(
-            own_board.unsqueeze(1), pieces_processed, pieces_processed)
+            own_board, pieces_processed, pieces_processed)
         opp_board = self.cnn(opp_board.unsqueeze(1)).view(
-            batch_size, ff_size, -1).amax(-1)
-        opp_state, _ = self.opp_attn(opp_board.unsqueeze(1), opp_p, opp_p)
+            batch_size, ff_size, -1).swapaxes(1, 2)
+        opp_state, _ = self.opp_attn(opp_board, opp_p, opp_p)
 
         state = torch.cat(
-            (own_state.squeeze(1), opp_state.squeeze(1), garbage_processed, memory), 1)
-        state = self.mlp(state)
-        state = self.relu6(state)
-        new_memory = self.memory(state)+memory
-        if mask:
-            new_memory[mask]=0
+            (own_state.mean(1), opp_state.mean(1), garbage_processed), 1)
+        state = self.mlp(state).view(batch_size, -1, d_model)
+        memory[mask] = self.initial_tokens
+        new_memory = self.memory_decoder(memory, state)
+        new_memory = self.mem_gate(new_memory+memory)
+        if out_mask is not None:
+            new_memory[out_mask] = self.initial_tokens
             return new_memory
-        value2 = self.macro_value(state)
+        new_state = self.state_decoder(state, memory)
+        state = state+new_state
+        value2 = self.macro_value(state.mean(1))
         value2 = self.relu6(value2)
 
         latent = self.latent(state)
-        latent = self.relu6(latent)
-        policy, value = self.model(x, latent, new_memory)
+        policy, value = self.model(x, latent)
 
         value = torch.cat((value, value2), -1)
         final_value = self.value(value).squeeze()
@@ -546,31 +572,74 @@ class PositionalEncoding2D(nn.Module):
         return x
 
 
+class AttnWithBias(nn.Module):
+    def __init__(self, len1, len2, d_model,  num_heads=8):
+        super(AttnWithBias, self).__init__()
+        self.num_heads = num_heads
+        self.d_model = d_model
+        self.d_head = self.d_model // num_heads
+        self.len1 = len1
+        self.len2 = len2
+        self.biaslayer = Bias_Layer(len1, len1, len2, num_heads)
+        self.q_linear = nn.Linear(d_model, d_model)
+        self.k_linear = nn.Linear(d_model, d_model)
+        self.v_linear = nn.Linear(d_model, d_model)
+        self.linear1 = nn.Linear(d_model, ff_size)
+        self.linear2 = nn.Linear(ff_size, d_model)
+        self.activation = nn.ReLU()
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+
+    def forward(self, state, pieces, layer=None):
+        batch_size = state.size(0)
+        # Linear transformations
+        q = self.q_linear(state).view(batch_size, self.len1,
+                                      self.num_heads, self.d_head)
+        k = self.k_linear(pieces).view(
+            batch_size, self.len2, self.num_heads, self.d_head)
+        v = self.v_linear(pieces).view(
+            batch_size, self.len2, self.num_heads, self.d_head)
+        bias = self.biaslayer(state, pieces).view(
+            batch_size, self.num_heads, self.len1, self.len2).transpose(1, 2)
+
+        # Scaled dot-product attention
+        attn_weights = torch.einsum(
+            'bqnd,bknd->bqnk', q, k) / (self.d_head ** 0.5)
+        attn_weights = F.softmax(attn_weights + bias, dim=-1)
+        output = torch.einsum('bqnk,bvnd->bqnd', attn_weights, v)
+
+        # Combine heads
+        output = output.view(batch_size, self.len1, self.d_model)
+        state = self.norm1(state+output)
+        new_state = self.activation(self.linear1(state))
+        state = self.norm2(state+self.linear2(new_state))
+        return state
+
+
 class Bias_Layer(nn.Module):
-    def __init__(self, in_size, seq_len, out_len):
+    def __init__(self, in_size, seq_len, out_len, nhead):
         super(Bias_Layer, self).__init__()
         self.hidden_size = 128
+        self.nhead = nhead
         self.relu6 = nn.ReLU6()
-        self.linear0 = nn.Linear(in_size, 4, bias=False)
-        self.linear1 = nn.Linear(4*seq_len, 32, bias=False)
-        self.linear2 = nn.Linear(32, self.hidden_size)
+        self.linear1 = nn.Linear(256, 32, bias=False)
+        self.linear2 = nn.Linear(32*d_model, self.hidden_size)
         self.layernorm1 = nn.LayerNorm(self.hidden_size)
-        self.linear3 = nn.Linear(self.hidden_size, self.hidden_size*8)
+        self.linear3 = nn.Linear(self.hidden_size, self.hidden_size*nhead)
         self.layernorm2 = nn.LayerNorm(self.hidden_size)
-        self.linear4 = nn.Linear(self.hidden_size, 16*seq_len*out_len)
+        self.linear4 = nn.Linear(self.hidden_size, seq_len*out_len)
         self.seq_len = seq_len
 
-    def forward(self, x):
-        batch_size, seq_len, in_size = x.shape
-        x = self.linear0(x).view(-1, 4*self.seq_len)
-        x = self.linear1(x)
+    def forward(self, x, y):
+        x = torch.cat((x, y), 1).swapaxes(-1, -2)
+        x = self.linear1(x).swapaxes(-1, -2).reshape(x.size(0), 32*d_model)
         x = self.relu6(x)
 
         x = self.linear2(x)
         x = self.layernorm1(x)
         x = self.relu6(x)
 
-        x = self.linear3(x).view(-1, 8, self.hidden_size)
+        x = self.linear3(x).view(-1, self.nhead, self.hidden_size)
         x = self.layernorm2(x)
         x = self.relu6(x)
 
