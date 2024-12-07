@@ -26,6 +26,7 @@ class manager:
         self.count = 0
         self.lines = 0
         self.atk = 0
+        self.filled_avg=0
         for remote in self.work_remotes:
             remote.close()
 
@@ -40,17 +41,20 @@ class manager:
         c = np.stack(rew).T
         for i in info:
             if i is not None:
-                self.count += 2
+                self.count += 1
                 self.lines += i[0]+i[2]
                 self.atk += i[1]+i[3]
+                self.filled_avg+=i[4]
         return obs, done, c
 
     def reset_data(self):
         self.count = 0
         self.lines = 0
         self.atk = 0
+        self.filled_avg=0
 
     def reset(self):
+        self.reset_data()
         for remote in self.remotes:
             remote.send(('reset', None))
         obs = [remote.recv() for remote in self.remotes]
@@ -68,6 +72,8 @@ def gather_data(remote, parent_remote, render, seed):
     game = tetris.Container()
     game.seed_reset(seed[0])
     old_filled = np.array(game.check_filled())
+    total_filled = 0
+    fill_checked_n = 0
     if render:
         r = tetris.Renderer(1, 10)
     try:
@@ -80,8 +86,11 @@ def gather_data(remote, parent_remote, render, seed):
                 if 1 in action:
                     filled = np.array(game.check_filled())
                     filled_diff = filled-old_filled
+                    mask = filled_diff != 0
+                    fill_checked_n += sum(mask)
+                    total_filled += sum(filled[mask])
                     old_filled = filled
-                    bonus = np.where(filled >= 0.8, 0.5, filled_diff)
+                    bonus = np.where(filled >= 0.9, 0.5, filled_diff)*0.2
 
                     rew = [rew[i]+(bonus[i] if (action[i] == 1) else 0)
                            for i in range(2)]
@@ -93,7 +102,11 @@ def gather_data(remote, parent_remote, render, seed):
                 #     print(f"{rew[0]:.4f}")
                 if done:
                     info = game.reset()
+
                     x, _, _ = game.get_state()
+                    info = (*info, total_filled/fill_checked_n)
+                    total_filled = 0
+                    fill_checked_n = 0
                     old_filled = np.array(game.check_filled())
                 else:
                     info = None

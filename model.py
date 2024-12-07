@@ -82,8 +82,7 @@ class Model3(nn.Module):
             state, pieces_with_rotations)
 
         state = new_state  # state+new_state
-        x = self.movement_decoder(pieces_processed[:,:1], state
-                                  )
+        x = self.movement_decoder(pieces_processed[:,:1], state)
         x = x.view(batch_size, d_model)
         # x = x+loc_processed
 

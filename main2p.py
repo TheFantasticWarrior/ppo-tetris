@@ -45,7 +45,8 @@ def main(lr):
                       'var rewards': [],
                       'explained variance': [],
                       'lines': [],
-                      'atk': []
+                      'atk': [],
+                      'filled%': [],
                       }
     if args.load:
         checkpoint = torch.load(args.path, weights_only=True)
@@ -91,9 +92,10 @@ def main(lr):
         sum_rews = buf.rews[:, ~buf.done.bool()].mean().item()
         rews_var = buf.rews.var().item()
         kpp = args.nenvs*args.nsteps*2/(buf.actions == 1).sum().item()
-        print(f"iteration {i}, {kpp=:.2f}, {env.count} deaths," +
-              f"{env.lines/count:.2f} lines, {env.atk / count:.2f} atk, " +
+        print(f"iteration {i}, {kpp=:.2f}, {env.count} deaths, " +
               f"{sum_rews:.4f} rewards total, {rews_var=:.4f}")
+        print(f"{env.lines/count:.2f} lines, {env.atk / count:.2f} atk, " +
+              f"avg {env.filled_avg/count*100:.1f}% filled")
         # print(buf.actions.cpu().numpy()[0,:,0])
         with torch.no_grad():
             _, next_val1, _\
@@ -127,7 +129,7 @@ def main(lr):
                     pv_model([ob[0][sli] for ob in flat_obs],
                              [ob[1][sli] for ob in flat_obs],
                              mem, dones[sli])
-                if args.debug_acs and epoch==0 and minibatch==0:
+                if args.debug_acs and epoch == 0 and minibatch == 0:
                     with torch.no_grad():
                         action_probs = torch.softmax(logits, dim=-1)
                         variances = action_probs.var(dim=0).mean().item()
@@ -190,7 +192,8 @@ def main(lr):
                               'total rewards': sum_rews,
                               'explained variance': ev.item(),
                               'lines': env.lines/count,
-                              'atk': env.atk / count
+                              'atk': env.atk / count,
+                              'filled%': env.filled_avg/count
                               }
         env.reset_data()
         for key in new_iteration_data:
