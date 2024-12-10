@@ -52,7 +52,15 @@ def main(lr):
         checkpoint = torch.load(args.path, weights_only=True)
         # if "loss" in checkpoint:
         #    loss_l = checkpoint["loss"]
-
+        reset_layers=[]
+        # reset_layers = ['model.value.weight', 'model.value.bias',
+        #                 'value.layers.1.weight', 'value.layers.1.bias',
+        #                 'macro_value.weight', 'macro_value.bias']
+        newstatedict = checkpoint['model2_state_dict']
+        if reset_layers:
+            oldstatedict = pv_model.state_dict()
+            for key in reset_layers:
+                newstatedict[key] = oldstatedict[key]
         if args.partial:
             ms = checkpoint['model2_state_dict']
             model_dict = pv_model.model.state_dict()
@@ -61,7 +69,7 @@ def main(lr):
             pv_model.model.load_state_dict(model_dict)
             # pv_model.model.load_state_dict(checkpoint['model_state_dict'])
         else:
-            pv_model.load_state_dict(checkpoint['model2_state_dict'])
+            pv_model.load_state_dict(newstatedict)
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         del checkpoint
     for i in range(args.iterations):

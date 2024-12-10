@@ -126,7 +126,6 @@ class MacroModel(nn.Module):
         super(MacroModel, self).__init__()
         self.relu6 = nn.ReLU6()
         self.cnn = SimpleCNN(ff_size)
-        self.queue_linear = nn.Linear(14, ff_size)
         self.piece_embedding = nn.Embedding(8, ff_size)
         self.ppos = PositionalEncoding(ff_size, max_len=7)
         self.garbage_embedding1 = nn.Conv1d(
