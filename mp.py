@@ -84,15 +84,18 @@ def gather_data(remote, parent_remote, render, seed):
                 game.step(*action)
                 x, done, rew = game.get_state()
                 if 1 in action:
-                    filled, height_diff = np.array(
-                        game.check_filled()).reshape(2, 2)
+                    filled, height_diff, bottom_diff = np.array(
+                        game.check_filled()).reshape(3, 2)
                     filled_diff = filled-old_filled
                     mask = filled_diff != 0
                     fill_checked_n += sum(mask)
                     total_filled += sum(filled[mask])
                     old_filled = filled
-                    bonus = (np.where(filled >= 0.9, 0.3+filled*0.2, filled_diff)*10 +
-                             np.maximum(1-height_diff/4., -2))*5
+                    bonus = (  # np.where(filled >= 0.9, 0.3+(filled-0.9)*2,
+                        (filled-0.9)*5 +
+                        np.clip(filled_diff, -0.1, 0.1)*10 +
+                        np.maximum(1-height_diff/4., -2)*0.5 +
+                        (bottom_diff/4.)*2)
 
                     rew = [rew[i]+(bonus[i] if (action[i] == 1) else 0)
                            for i in range(2)]

@@ -49,13 +49,15 @@ class Model3(nn.Module):
         self.policy = MLP((ff_size, ff_size, 10))
         self.value = nn.Linear(ff_size, ff_size)
 
+        self.dropout = nn.Dropout(0.1)
+
     def forward(self, x, state_in):
         xyrot, queue, remains, board, _ = x
         batch_size = queue.size(0)
 
         default_pos = torch.full(
             (batch_size, 13, 4), -1, device=torch.device("cuda"))
-        pos = torch.cat((xyrot.unsqueeze(1), default_pos), 1)
+        pos = torch.cat((xyrot.float().unsqueeze(1), default_pos), 1)
         loc = self.loc_embedding(pos)
         loc = self.relu6(loc)
         loc_processed = self.loc_embedding2(loc)
@@ -82,13 +84,14 @@ class Model3(nn.Module):
             state, pieces_with_rotations)
 
         state = new_state  # state+new_state
-        x = self.movement_decoder(pieces_processed[:,:1], state)
+        x = self.movement_decoder(pieces_processed[:, :1], state)
         x = x.view(batch_size, d_model)
         # x = x+loc_processed
 
         x = self.final_linear(x)
         x = self.relu6(x)
-        x = self.final_linear2(x)+x
+        x = self.dropout(x)
+        x = self.dropout(self.final_linear2(x))
         x = self.final_norm(x)
 
         logits = self.policy(x)
@@ -166,6 +169,8 @@ class MacroModel(nn.Module):
                                 std=np.sqrt(1. / module.weight.size(1)))
         nn.init.orthogonal_(self.model.policy.layers[-1].weight, 0.01)
         nn.init.orthogonal_(self.value.layers[-1].weight, 1)
+        nn.init.orthogonal_(self.macro_value.weight, 1)
+        nn.init.orthogonal_(self.model.value.weight, 1)
 
     def forward(self, x, y, memory, mask, out_mask=None):
         _, queue, remains, board, garbage = x
@@ -188,11 +193,11 @@ class MacroModel(nn.Module):
         garbage_processed = self.garbage_embedding3(
             garbage_processed
         ).view(batch_size, ff_size)
-        own_board = self.cnn(board.unsqueeze(1)).view(
+        own_board = self.cnn(board.float().unsqueeze(1)).view(
             batch_size, ff_size, -1).swapaxes(1, 2)
         own_state, _ = self.own_attn(
             own_board, pieces_processed, pieces_processed)
-        opp_board = self.cnn(opp_board.unsqueeze(1)).view(
+        opp_board = self.cnn(opp_board.float().unsqueeze(1)).view(
             batch_size, ff_size, -1).swapaxes(1, 2)
         opp_state, _ = self.opp_attn(opp_board, opp_p, opp_p)
 
