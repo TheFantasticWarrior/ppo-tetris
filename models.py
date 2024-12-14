@@ -8,6 +8,35 @@ ff_size = args.ff_size
 d_model = args.d_model
 
 
+class SModel2(nn.Module):
+    def __init__(self, ff_size=ff_size):
+        super(SModel2, self).__init__()
+        self.CNN = SimpleCNN(ff_size)
+        self.rowpool = nn.MaxPool2d((1, 5), (1, 5))
+        self.pool = nn.MaxPool2d(3, 2)
+
+        self.loc_embedding = nn.Linear(5, ff_size)
+        self.piece_embedding = nn.Embedding(8, ff_size)
+
+        self.mlp = MLP((84*ff_size, 32*ff_size, 8*ff_size))
+        self.policy = MLP((8*ff_size, 4*ff_size, 2*ff_size,  ff_size,  10))
+        self.value = MLP((8*ff_size, 4*ff_size, 2*ff_size, ff_size,  1))
+
+    def forward(self, x, *_):
+        xyrot, queue, _, board, _ = x
+        batch_size = xyrot.size(0)
+        loc = self.loc_embedding(xyrot)
+        queue = self.piece_embedding(queue).view(batch_size, -1)
+        board = self.CNN(board.float().unsqueeze(1))
+        row = self.rowpool(board).view(batch_size, -1)
+        board = self.pool(board).view(batch_size, -1)
+        state = torch.cat((loc, queue, row, board), -1)
+        state = self.mlp(state)
+        policy = self.policy(state)
+        value = self.value(state).squeeze()
+        return policy, value, None
+
+
 class Model3(nn.Module):
     def __init__(self, ff_size=ff_size, d_model=d_model):
         super(Model3, self).__init__()
@@ -15,7 +44,7 @@ class Model3(nn.Module):
         self.ff_size = ff_size
         self.relu6 = nn.ReLU6()
         self.ppos = PositionalEncoding(d_model, max_len=7)
-        self.loc_embedding = nn.Linear(4, d_model)
+        self.loc_embedding = nn.Linear(5, d_model)
         self.loc_embedding2 = nn.Linear(d_model, d_model)
         self.piece_embedding = nn.Embedding(8, d_model)
         self.rotation_embedding = nn.Linear(d_model, d_model*4)
@@ -35,19 +64,19 @@ class Model3(nn.Module):
 
         # Separate decoders with their own layers
         self.macro_decoder = nn.TransformerDecoder(
-            macro_layer, num_layers=2)
+            macro_layer, num_layers=3)
         self.board_decoder = nn.TransformerDecoder(
-            board_layer, num_layers=2)
+            board_layer, num_layers=4)
         self.movement_decoder = nn.TransformerDecoder(
-            movement_layer, num_layers=2)
+            movement_layer, num_layers=4)
 
         self.p_encode = PositionalEncoding2D(d_model, 20, 10)
 
         self.final_linear = nn.Linear(d_model, ff_size)
         self.final_linear2 = nn.Linear(ff_size, ff_size)
         self.final_norm = nn.LayerNorm(ff_size)
-        self.policy = MLP((ff_size, ff_size, 10))
-        self.value = nn.Linear(ff_size, ff_size)
+        self.policy = MLP((ff_size+d_model, ff_size, 10))
+        self.value = nn.Linear(ff_size+d_model, ff_size)
 
         self.dropout = nn.Dropout(0.1)
 
@@ -56,7 +85,7 @@ class Model3(nn.Module):
         batch_size = queue.size(0)
 
         default_pos = torch.full(
-            (batch_size, 13, 4), -1, device=torch.device("cuda"))
+            (batch_size, 13, 5), -1, device=torch.device("cuda"))
         pos = torch.cat((xyrot.float().unsqueeze(1), default_pos), 1)
         loc = self.loc_embedding(pos)
         loc = self.relu6(loc)
@@ -94,6 +123,7 @@ class Model3(nn.Module):
         x = self.dropout(self.final_linear2(x))
         x = self.final_norm(x)
 
+        x = torch.cat((x, loc_processed[:, 0]), -1)
         logits = self.policy(x)
         value_latent = self.relu6(self.value(x))
         return logits, value_latent
@@ -231,10 +261,12 @@ class MLP(nn.Module):
             layers.append(nn.Linear(sizes[i], sizes[i+1]))
         self.layers = nn.ModuleList(layers)
         self.activation = nn.ReLU6()
+        self.dropout = nn.Dropout(0.1)
 
     def forward(self, x):
         for layer in self.layers[:-1]:
             x = layer(x)
+            x = self.dropout(x)
             x = self.activation(x)
         x = self.layers[-1](x)
         return x

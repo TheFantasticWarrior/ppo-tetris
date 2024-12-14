@@ -74,6 +74,7 @@ def gather_data(remote, parent_remote, render, seed):
     old_filled = np.array(game.check_filled()[:2])
     total_filled = 0
     fill_checked_n = 0
+    scale=0.1
     if render:
         r = tetris.Renderer(1, 10)
     try:
@@ -92,12 +93,13 @@ def gather_data(remote, parent_remote, render, seed):
                     total_filled += sum(filled[mask])
                     old_filled = filled
                     bonus = (  # np.where(filled >= 0.9, 0.3+(filled-0.9)*2,
-                        (filled-0.9)*5 +
-                        np.clip(filled_diff, -0.1, 0.1)*10 +
-                        np.maximum(1-height_diff/4., -2)*0.5 +
-                        (bottom_diff/4.)*2)
+                        filled-0.9 +
+                        filled_diff +
+                        -height_diff/4.)*scale
 
-                    rew = [rew[i]+(bonus[i] if (action[i] == 1) else 0)
+                    rew = [rew[i]+np.minimum(1, bottom_diff[i]/4.)*scale +
+                           (bonus[i] if (action[i] == 1) and
+                            not (rew[i] > 1.2 and bonus[i] < 0) else 0)
                            for i in range(2)]
                     # if render:
                     #     print(filled_diff)

@@ -28,6 +28,8 @@ def load(path, model, optimizer, return_pool=False):
 
 
 def main(lr):
+    no_win = True
+
     torch.autograd.set_detect_anomaly(True)
     env = mp.manager(args.nenvs, args.seed, args.render)
 
@@ -38,7 +40,8 @@ def main(lr):
     buf_opp = core.Buffer(args.nsteps, nenvs_self)
     mem0, mem1 = (lambda x: (x[:nenvs_self], x[:args.nopps]))(
         buf.memory[0].clone())
-    model = MacroModel().to(torch.device("cuda"))
+    model = models.SModel2().to(torch.device("cuda"))
+    # model = models.MacroModel().to(torch.device("cuda"))
     pool = core.ModelPool(model)
     optimizer = torch.optim.AdamW(model.parameters(), lr)
     lr_scheduler = torch.optim.lr_scheduler.LambdaLR(
@@ -77,7 +80,10 @@ def main(lr):
                     inputs[2], inputs[3],
                     mem1, done[-args.nopps:])
                 logits2 = torch.cat(logits2, 0)
-                mem1 = torch.cat(mem1, 0)
+                if mem0 is not None:
+                    buf.memory[step] = mem0
+                    if mem1 is not None:
+                        mem1 = torch.cat(mem1, 0)
             logits = torch.cat((logits, logits2), 0)
             actions, logprobs = core.sample(logits)
 
@@ -102,8 +108,12 @@ def main(lr):
             inputs = core.split_obs(obs)
             _, next_val, _ = model(inputs[0], inputs[1], mem0,
                                    done.expand(2, -1).reshape(-1)[:nenvs_self])
+            if no_win:
+                done = torch.tensor(
+                    rew == -1,
+                    device=torch.device("cuda")).flatten()[:nenvs_self]
             returns, advs = core.calc_gae(
-                buf, next_val, done)
+                buf, next_val, done, no_win)
         for epoch in range(args.nepoch):
             order = np.arange(nenvs_self*args.nsteps)
             np.random.shuffle(order)
@@ -116,14 +126,17 @@ def main(lr):
                 log_prob = buf.logprob.flatten()[sli]
                 vals = buf.values.flatten()[sli]
                 dones = buf.done.flatten().bool()
-                mem = model(buf.flat_obs(sli-1),
-                            buf_opp.flat_obs(sli-1),
-                            buf.memory.view(
-                            -1, *buf.memory.shape[2:])[sli-1],
-                            dones[sli-1], dones[sli])
-                logits, new_values, _ = model(buf.flat_obs(sli),
-                                              buf_opp.flat_obs(sli),
-                                              mem, dones[sli])
+                if mem0 is None:
+                    logits, new_values, _ = model(buf.flat_obs(sli))
+                else:
+                    mem = model(buf.flat_obs(sli-1),
+                                buf_opp.flat_obs(sli-1),
+                                buf.memory.view(
+                                -1, *buf.memory.shape[2:])[sli-1],
+                                dones[sli-1], dones[sli])
+                    logits, new_values, _ = model(buf.flat_obs(sli),
+                                                  buf_opp.flat_obs(sli),
+                                                  mem, dones[sli])
                 if args.debug_acs and epoch == 0 and minibatch == 0:
                     core.debug_actions(logits)
                 # print(logits.mean(),logits.max(),logits.min())
@@ -205,7 +218,7 @@ if __name__ == "__main__":
     import pandas as pd
     import core2p as core
     import mp
-    from model import MacroModel
+    import models
     import torch
     import numpy as np
     import torch.nn as nn

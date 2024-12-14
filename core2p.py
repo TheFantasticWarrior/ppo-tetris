@@ -8,10 +8,10 @@ class ModelPool:
     def __init__(self, model):
         model.cpu()
         self.models = [model.state_dict()]
+        model.cuda()
         self.scores = [1]
         self.sumexpscore = np.exp(1)
         self.active_models = [copy.deepcopy(model) for i in range(args.nopps)]
-        model.cuda()
         self.active_idx = np.zeros(args.nopps, dtype=int)
 
     def update(self, model):
@@ -21,10 +21,10 @@ class ModelPool:
         new_score = max(self.scores) if len(self.scores) else 1
         # print(self.scores)
         self.scores.append(new_score)
-        # if len(self.models) > 20:
-        #     idx = self.scores.index(min(self.scores))
-        #     del self.scores[idx]
-        #     del self.models[idx]
+        if len(self.models) > 30:
+            idx = self.scores.index(min(self.scores))
+            del self.scores[idx]
+            del self.models[idx]
 
     def sample(self, dones, win):
         # if done update score and sample from model pool
@@ -73,7 +73,7 @@ class ModelPool:
 class Buffer:
     def __init__(self, nsteps, nenvs):
 
-        self.obs = [torch.zeros((nsteps, nenvs, 4), dtype=torch.float32).to(torch.device("cuda")),
+        self.obs = [torch.zeros((nsteps, nenvs, 5), dtype=torch.float32).to(torch.device("cuda")),
                     torch.zeros((nsteps, nenvs, 7), dtype=torch.int).to(
             torch.device("cuda")),
             torch.zeros((nsteps, nenvs, 7), dtype=torch.int).to(
@@ -118,7 +118,7 @@ def sample(logits):
     return action, probs.log_prob(action)
 
 
-def calc_gae(buf, next_vals, last_done, gamma=args.gamma, gae_lambda=0.95):
+def calc_gae(buf, next_vals, last_done, no_win=False, gamma=args.gamma, gae_lambda=0.95):
     advantages = torch.zeros_like(buf.rews).to(torch.device("cuda"))
     lastgaelam = 0
     num_steps = advantages.size(0)
@@ -127,7 +127,8 @@ def calc_gae(buf, next_vals, last_done, gamma=args.gamma, gae_lambda=0.95):
             nextnonterminal = ~last_done
             nextvalues = next_vals
         else:
-            nextnonterminal = ~buf.done[t + 1]
+            nextnonterminal = buf.rews[t+1] != -1 if no_win else \
+                ~buf.done[t + 1]
             nextvalues = buf.values[t + 1]
         delta = buf.rews[t] + gamma * nextvalues *\
             nextnonterminal - buf.values[t]
